@@ -1,65 +1,113 @@
 ---
-name: review-pr
-description: Review a GitHub pull request for concrete bugs and post actionable inline comments when requested. Use when asked to review a PR with comments or when explicitly invoked as $review-pr.
+name: pr-review
+description: Review a GitHub pull request and post actionable inline review comments in a structured bug-prediction format (Bug summary, severity/confidence, collapsible analysis, suggested fix, and a verification prompt for an AI agent). Use this skill whenever the user asks to review a PR, check a pull request for bugs, "look at PR #123", review the current branch's PR, or leave review comments on GitHub — even if they only paste a PR URL or number without saying "review".
 ---
 
-# Review a pull request
+# PR Review
 
-Find defects introduced by a PR and explain them in resolvable inline threads. Explicit use of `$review-pr` or a request to leave review comments authorizes posting qualifying findings. If the user asks for a read-only review, report findings locally and do not post.
+Review a pull request and leave **actionable inline comments** as resolvable review threads, using one fixed comment format.
 
-Accept a PR number, URL, or `#123`. With no target, use the PR for the current branch. Do not post if the target cannot be identified unambiguously.
+**Input:** a PR number, `#123`, or a PR URL taken from the user's request. If none is given, review the PR of the current branch.
 
-## Resolve and inspect
+**Requires:** `gh` (authenticated), `python3`, run from inside the repo checkout.
 
-Use `gh pr view` to obtain the PR number, URL, title, body, head SHA, and changed files. Derive `OWNER/REPO` from the **resolved PR URL**, not from the current directory. Pass `-R OWNER/REPO` to subsequent `gh pr` calls, and use that same owner and repo for `gh api` calls. Fetch the complete diff with `gh pr diff -R OWNER/REPO <number>` and check it against the changed-file list. If the diff is incomplete or unavailable, disclose that limit; do not claim a complete review.
+## 1. Resolve the PR and gather context
 
-Review code at the PR head SHA. A local checkout may be on another branch or commit: verify its SHA before using it, or fetch the head into an isolated checkout/worktree. Read relevant callers, consumers, tests, API contracts, and configuration when they determine whether a suspected bug is real. If Sentry telemetry is available and relevant, use it as additional evidence; never imply telemetry was checked when it was not.
+```bash
+# No PR given — find the PR for the current branch
+gh pr view --json number,title,body,headRefOid,baseRefName,author,url
 
-Check existing PR review comments with `gh api "repos/OWNER/REPO/pulls/<number>/comments" --paginate`. Before posting, compare each finding with existing comments on the same code path and failure mode, including comments from other reviewers. Skip duplicates and issues already fixed by a later PR commit.
+# PR given (number or URL)
+gh pr view <N-or-URL> --json number,title,body,headRefOid,baseRefName,author,url
 
-## Select findings
-
-Post only when all of these are true:
-
-- The change causes a concrete runtime, security, data, performance, compatibility, or API-contract failure.
-- The failure scenario and its impact are specific and supported by the code path.
-- The finding can be anchored to an appropriate line in the PR diff and has a practical fix.
-
-Check for failures such as exceptions, incorrect data shapes, access-control gaps, unbounded work or N+1 queries, and breaking changes to callers. Do not post style or naming advice, generic test requests, or speculative possibilities. If no finding qualifies, post nothing; do not leave an approval or “LGTM” comment merely to record the review.
-
-Use severity to describe **impact**, not the presence of a crash:
-
-| Severity | Use for |
-| --- | --- |
-| CRITICAL | Widespread outage, data loss, or serious security exposure |
-| HIGH | A broken feature or severe failure with a narrower scope |
-| MEDIUM | A reproducible edge case or meaningful degraded behavior |
-| LOW | Minor impact; normally do not post |
-
-Confidence is **High** when the relevant code path verifies the claim, **Medium** when strong evidence remains subject to one stated, bounded assumption, and **Low** when evidence is insufficient. Do not post Low-confidence findings. Do not present a Medium-confidence possibility as a proven bug.
-
-## Write comments
-
-Keep each thread short enough to scan. State the bug and impact first, then the evidence and a concrete fix. For example:
-
-```markdown
-**Bug:** This reads `data.requests`, but the endpoint returns `examRequests`, so the page fails when it renders the response.
-
-**Evidence:** `getRequests` returns `{ examRequests }`; this component passes `data.requests` to `setRequests` and later calls `.map` on it.
-
-**Fix:** Pass `data.examRequests` to `setRequests`.
-
-<sub>Severity: HIGH · Confidence: High</sub>
+gh pr diff <N-or-URL>                        # full diff
+gh pr view <N-or-URL> --json files           # changed files
 ```
 
-Use actual identifiers and behavior from the PR; do not copy the example as a finding. State any bounded assumption behind Medium confidence. Avoid Sentry or Seer markers, feedback claims, and reference IDs unless this review is actually being posted by that system. An agent-facing verification prompt is optional only when the user or repository workflow calls for one.
+Run these in parallel where possible. Use the PR `url` as the source of truth for owner/repo — the checkout's default remote may differ (forks).
 
-## Post and report
+## 2. Review the diff
 
-Anchor to the smallest relevant changed line or range. For added or changed code, use new-file line numbers with `side: "RIGHT"`; use `side: "LEFT"` for a deletion. A multiline comment also needs `start_line` and `start_side`, with `line` as the final line. Validate path, side, and line numbers against the diff before posting. Do not replace an invalid line anchor with a file-level comment automatically. See [GitHub's review comment parameters](https://docs.github.com/en/rest/pulls/comments).
+Read the FULL diff, not a summary. When a finding depends on code outside the diff (callers, consumers, API response shapes, types), open those files in the repo and verify — that is what separates High from Medium confidence.
 
-Prefer one review containing all qualifying inline comments. Build JSON with `jq` so comment text is escaped correctly. For `POST repos/OWNER/REPO/pulls/<number>/reviews`, include the reviewed `commit_id`, `event: "COMMENT"`, a short required review `body` (for example, `"Actionable findings are inline."`), and a `comments` array whose entries contain `path`, `line`, `side`, `body`, plus `start_line` and `start_side` for ranges. Do not post findings in the top-level review body or with `gh pr comment`. See [GitHub's create-review parameters](https://docs.github.com/en/rest/pulls/reviews).
+**Post a finding only when ALL of these hold:**
 
-Immediately before posting, recheck the PR head SHA. If it changed, refresh the diff and revalidate findings and anchors. On a `422` response, inspect the returned error: it may indicate invalid placement or another validation/rate-limit problem. Retry only after correcting a confirmed cause and rechecking for comments already posted; otherwise stop and report the unposted findings. Do not silently switch to individual or file-level posts.
+- It is a real bug, logic error, data/API mismatch, security issue, race condition, or breaking change
+- It points to specific lines in the diff
+- There is a concrete failure scenario
+- There is a concrete fix
 
-Report the PR URL, reviewed head SHA, concise findings with file/line links, and how many comments were posted, skipped as duplicates, or left unposted. For a read-only review, label all findings unposted. If there are no actionable issues, say so without implying the review proves the PR bug-free.
+**Do not comment on:** style, naming, formatting, missing tests, "consider…" suggestions, or anything speculative. Noise trains authors to ignore the bot, so an empty review is a good outcome when the PR is clean. Never post "LGTM".
+
+| Severity | Meaning |
+|---|---|
+| CRITICAL | Crashes, data loss, security holes, broken prod behavior |
+| HIGH | A feature is broken or returns wrong data |
+| MEDIUM | Edge case or degraded behavior |
+| LOW | Minor — not posted |
+
+Confidence: **High** = verified by reading the actual code paths. **Medium** = strong evidence, one unverified assumption. **Low** = do not post.
+
+### Line placement
+
+Inline comments can only anchor to lines inside a diff hunk on the RIGHT side (new-file numbering — added `+` lines and unchanged context lines). A range must sit within a single hunk. To see exactly which lines are commentable:
+
+```bash
+gh pr diff <N> | python3 scripts/diff_lines.py            # all files
+gh pr diff <N> | python3 scripts/diff_lines.py src/foo.ts # one file
+```
+
+## 3. Write the findings file
+
+Put every finding in `/tmp/pr-findings.json`:
+
+```json
+[
+  {
+    "path": "src/app/api/portal/getRequests/route.js",
+    "start_line": 61,
+    "line": 68,
+    "title": "response key mismatch crashes exam-requests page",
+    "severity": "CRITICAL",
+    "confidence": "High",
+    "summary": "The route returns `examRequests` but the page reads `data.requests`, so the exam-requests page crashes on load.",
+    "analysis": "Full explanation: what the code does, why it fails, the concrete failure scenario. Reference real identifiers, endpoints and data shapes from the diff.",
+    "fix": "Concrete fix naming the exact change, e.g. change `setRequests(data.requests)` to `setRequests(data.examRequests)`. Code blocks are fine here."
+  }
+]
+```
+
+- `title`: short one-liner used in the final report.
+- `summary`: 1–2 sentences — what is wrong and the user-visible impact.
+- `line` is the LAST line of the range; `start_line` the first. Omit `start_line` for a single line.
+- `analysis` is copied verbatim into the AI-agent prompt, which sits inside a code fence — so keep it prose with inline `code` only. Put fenced code blocks in `fix`.
+
+## 4. Post the review
+
+```bash
+python3 scripts/post_review.py --pr <N-or-URL> --findings /tmp/pr-findings.json --dry-run  # inspect first
+python3 scripts/post_review.py --pr <N-or-URL> --findings /tmp/pr-findings.json
+```
+
+The script renders each comment body in the exact format from `references/comment-template.md` (with a fresh 7-hex Reference ID), validates every line range against the diff, and posts all comments as ONE review (single notification, each comment a resolvable thread). If the review is rejected with `422`, it retries each comment individually, and falls back to a file-level comment (`subject_type: file`, still resolvable) for any that can't be placed on a line. It refuses Low-confidence findings and skips LOW severity.
+
+Never post findings via `gh pr comment` or as a top-level review body — those can't be resolved.
+
+If the script can't be used, build the bodies by hand from `references/comment-template.md` and post with `gh api repos/<owner>/<repo>/pulls/<N>/reviews -X POST --input <payload.json>` (`event: "COMMENT"`, `side: "RIGHT"`, `start_side: "RIGHT"` for ranges).
+
+## 5. Report
+
+The script prints this; relay it to the user:
+
+```
+PR Review Complete
+
+PR: #123 — <title> (<url>)
+Comments posted: 3
+
+1. [CRITICAL] src/app/api/portal/getRequests/route.js#L61-L68 — response key mismatch crashes exam-requests page
+2. [HIGH] src/lib/auth.js#L34 — token expiry check uses wrong unit
+3. [MEDIUM] src/components/Table.jsx#L102 — unguarded .map on possibly undefined prop
+```
+
+If there are zero actionable findings, post nothing and report: "No actionable issues found — no comments posted."

@@ -1,0 +1,8 @@
+# Omarchy-provided skills — these are symlinks into /usr/share/omarchy,
+# not part of this repo.
+skills/omarchy
+skills/diagnose-crash
+
+# Python caches (from the pr-review scripts)
+__pycache__/
+*.pyc
