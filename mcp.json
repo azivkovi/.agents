@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "sentry": {
+      "command": "/home/antepante/.agents/bin/sentry-mcp.sh"
+    }
+  }
+}
