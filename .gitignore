@@ -6,3 +6,6 @@ skills/diagnose-crash
 # Python caches (from the pr-review scripts)
 __pycache__/
 *.pyc
+
+# Local secrets
+.env
