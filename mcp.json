@@ -2,6 +2,10 @@
   "mcpServers": {
     "sentry": {
       "command": "/home/antepante/.agents/bin/sentry-mcp.sh"
+    },
+    "playwright": {
+      "command": "/home/antepante/.agents/bin/playwright-mcp.sh",
+      "description": "Browser automation via Playwright: navigate, click, type, snapshot, and screenshot pages."
     }
   }
 }

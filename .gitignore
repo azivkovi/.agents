@@ -9,3 +9,6 @@ __pycache__/
 
 # Local secrets
 .env
+
+# Playwright MCP output (page snapshots, screenshots)
+.playwright-mcp/
